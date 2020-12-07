@@ -132,7 +132,8 @@ class AllocationCandidates(object):
         candidates = {}
         for suffix, group in groups.items():
             rg_ctx = res_ctx.RequestGroupSearchContext(
-                context, group, rw_ctx.has_trees, sharing, suffix)
+                context, group, rw_ctx.has_trees, sharing, suffix,
+                rqparams.ignore_consumers)
 
             # Which resource classes are requested in more than one group?
             for rc in rg_ctx.rcs:
@@ -504,7 +505,8 @@ def _build_provider_summaries(context, rw_ctx, root_ids, prov_traits):
     #        'reserved': integer,
     #        'allocation_ratio': float,
     #    }
-    usages = res_ctx.get_usages_by_provider_trees(context, new_roots)
+    usages = res_ctx.get_usages_by_provider_trees(context, new_roots,
+                                                  rw_ctx.ignore_consumers)
 
     # Before we go creating provider summary objects, first grab all the
     # provider information (including root, parent and UUID information) for

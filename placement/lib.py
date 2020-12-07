@@ -16,6 +16,7 @@ consumers.  When placement is separated out, this module should be part of a
 common library that both placement and its consumers can require."""
 import re
 
+from oslo_utils import uuidutils
 import webob
 
 from placement import errors
@@ -335,7 +336,7 @@ class RequestWideParams(object):
     """
     def __init__(self, limit=None, group_policy=None,
                  anchor_required_traits=None, anchor_forbidden_traits=None,
-                 same_subtrees=None):
+                 same_subtrees=None, ignore_consumers=None):
         """Create a RequestWideParams.
 
         :param limit: An integer, N, representing the maximum number of
@@ -361,12 +362,15 @@ class RequestWideParams(object):
                 providers satisfying the specified request groups must be
                 rooted at one of the resource providers satisfying the request
                 groups.
+        :param ignore_consumers: A list of UUIDs of consumers that should be
+                ignored when finding allocation candidates.
         """
         self.limit = limit
         self.group_policy = group_policy
         self.anchor_required_traits = anchor_required_traits
         self.anchor_forbidden_traits = anchor_forbidden_traits
         self.same_subtrees = same_subtrees or []
+        self.ignore_consumers = ignore_consumers or []
 
     @classmethod
     def from_request(cls, req):
@@ -414,10 +418,19 @@ class RequestWideParams(object):
                         'in `same_subtree` ',
                         comment=errors.QUERYPARAM_BAD_VALUE)
                 same_subtrees.append(suffixes)
+        ignore_consumers = req.GET.getall('ignore_consumer')
+        if ignore_consumers:
+            for val in ignore_consumers:
+                if not uuidutils.is_uuid_like(val):
+                    msg = ("Invalid query string parameters: Expected "
+                           "'ignore_consumer' parameter to be a format of "
+                           "uuid. Got: %(val)s") % {'val': val}
+                    raise webob.exc.HTTPBadRequest(msg)
 
         return cls(
             limit=limit,
             group_policy=group_policy,
             anchor_required_traits=anchor_required_traits,
             anchor_forbidden_traits=anchor_forbidden_traits,
-            same_subtrees=same_subtrees)
+            same_subtrees=same_subtrees,
+            ignore_consumers=ignore_consumers)
