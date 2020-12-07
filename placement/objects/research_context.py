@@ -46,7 +46,8 @@ class RequestGroupSearchContext(object):
     """An adapter object that represents the search for allocation candidates
     for a single request group.
     """
-    def __init__(self, context, group, has_trees, sharing, suffix=''):
+    def __init__(self, context, group, has_trees, sharing, suffix='',
+                 ignore_consumers=None):
         """Initializes the object retrieving and caching matching providers
         for each conditions like resource and aggregates from database.
 
@@ -125,7 +126,8 @@ class RequestGroupSearchContext(object):
             rc_name = context.rc_cache.string_from_id(rc_id)
             LOG.debug('getting providers with %d %s', amount, rc_name)
             provs_with_resource = get_providers_with_resource(
-                context, rc_id, amount, tree_root_id=self.tree_root_id)
+                context, rc_id, amount, tree_root_id=self.tree_root_id,
+                ignore_consumers=ignore_consumers)
             if not provs_with_resource:
                 LOG.debug('found no providers with %d %s', amount, rc_name)
                 raise exception.ResourceProviderNotFound()
@@ -185,6 +187,7 @@ class RequestWideSearchContext(object):
         self.group_policy = rqparams.group_policy
         self._nested_aware = nested_aware
         self.has_trees = _has_provider_trees(context)
+        self.ignore_consumers = rqparams.ignore_consumers
         # This is set up by _process_anchor_* below. It remains None if no
         # anchor filters were requested. Otherwise it becomes a set of internal
         # IDs of root providers that conform to the requested filters.
@@ -405,11 +408,14 @@ def provider_ids_from_uuid(context, uuid):
     return res
 
 
-def _usage_select(rc_ids):
+def _usage_select(rc_ids, ignore_consumers):
     usage = sa.select([_ALLOC_TBL.c.resource_provider_id,
                        _ALLOC_TBL.c.resource_class_id,
                        sql.func.sum(_ALLOC_TBL.c.used).label('used')])
     usage = usage.where(_ALLOC_TBL.c.resource_class_id.in_(rc_ids))
+    if ignore_consumers:
+        usage = usage.where(
+            sa.not_(_ALLOC_TBL.c.consumer_id.in_(ignore_consumers)))
     usage = usage.group_by(_ALLOC_TBL.c.resource_provider_id,
                            _ALLOC_TBL.c.resource_class_id)
     return sa.alias(usage, name='usage')
@@ -427,7 +433,8 @@ def _capacity_check_clause(amount, usage, inv_tbl=_INV_TBL):
 
 
 @db_api.placement_context_manager.reader
-def get_providers_with_resource(ctx, rc_id, amount, tree_root_id=None):
+def get_providers_with_resource(ctx, rc_id, amount, tree_root_id=None,
+                                ignore_consumers=None):
     """Returns a set of tuples of (provider ID, root provider ID) of providers
     that satisfy the request for a single resource class.
 
@@ -437,6 +444,7 @@ def get_providers_with_resource(ctx, rc_id, amount, tree_root_id=None):
     :param tree_root_id: An optional root provider ID. If provided, the results
                          are limited to the resource providers under the given
                          root resource provider.
+    :param ignore_consumers: List of consumer UUIDs to ignore resources of.
     """
     # SELECT rp.id, rp.root_provider_id
     # FROM resource_providers AS rp
@@ -448,7 +456,9 @@ def get_providers_with_resource(ctx, rc_id, amount, tree_root_id=None):
     #    alloc.resource_provider_id,
     #    SUM(allocs.used) AS used
     #  FROM allocations AS alloc
-    #  WHERE allocs.resource_class_id = $RC_ID
+    #  WHERE
+    #   allocs.resource_class_id = $RC_ID
+    #   AND NOT allocs.consumer_id IN ($IGNORE_CONSUMERS)
     #  GROUP BY allocs.resource_provider_id
     # ) AS usage
     #  ON inv.resource_provider_id = usage.resource_provider_id
@@ -461,7 +471,7 @@ def get_providers_with_resource(ctx, rc_id, amount, tree_root_id=None):
     #  AND rp.root_provider_id == $tree_root_id
     rpt = sa.alias(_RP_TBL, name="rp")
     inv = sa.alias(_INV_TBL, name="inv")
-    usage = _usage_select([rc_id])
+    usage = _usage_select([rc_id], ignore_consumers)
     rp_to_inv = sa.join(
         rpt, inv, sa.and_(
             rpt.c.id == inv.c.resource_provider_id,
@@ -1225,9 +1235,11 @@ def _has_provider_trees(ctx):
     return len(res) > 0
 
 
-def get_usages_by_provider_trees(ctx, root_ids):
+def get_usages_by_provider_trees(ctx, root_ids, ignore_consumers=None):
     """Returns a row iterator of usage records grouped by provider ID
     for all resource providers in all trees indicated in the ``root_ids``.
+
+    :param ignore_consumers: List of UUIDs of consumers to ignore.
     """
     # We build up a SQL expression that looks like this:
     # SELECT
@@ -1248,6 +1260,7 @@ def get_usages_by_provider_trees(ctx, root_ids):
     #   JOIN resource_providers
     #     ON allocations.resource_provider_id = resource_providers.id
     #     AND resource_providers.root_provider_id IN($root_ids)
+    #   WHERE consumer_id NOT IN ($ignore_consumers)
     #   GROUP BY resource_provider_id, resource_class_id
     # )
     # AS usage
@@ -1265,15 +1278,20 @@ def get_usages_by_provider_trees(ctx, root_ids):
                 _RP_TBL.c.root_provider_id.in_(sa.bindparam(
                     'root_ids', expanding=True)))
     )
+    usage_sel = sa.select([
+        _ALLOC_TBL.c.resource_provider_id,
+        _ALLOC_TBL.c.resource_class_id,
+        sql.func.sum(_ALLOC_TBL.c.used).label('used'),
+    ]).select_from(derived_alloc_to_rp)
+    if ignore_consumers:
+        usage_sel = usage_sel.where(
+            sa.not_(_ALLOC_TBL.c.consumer_id.in_(ignore_consumers)))
+    usage_sel = usage_sel.group_by(
+        _ALLOC_TBL.c.resource_provider_id,
+        _ALLOC_TBL.c.resource_class_id
+    )
     usage = sa.alias(
-        sa.select([
-            _ALLOC_TBL.c.resource_provider_id,
-            _ALLOC_TBL.c.resource_class_id,
-            sql.func.sum(_ALLOC_TBL.c.used).label('used'),
-        ]).select_from(derived_alloc_to_rp).group_by(
-            _ALLOC_TBL.c.resource_provider_id,
-            _ALLOC_TBL.c.resource_class_id
-        ),
+        usage_sel,
         name='usage')
     # Build a join between the resource providers and inventories table
     rpt_inv_join = sa.outerjoin(rpt, inv,
