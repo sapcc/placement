@@ -11,6 +11,7 @@
 #    under the License.
 
 import collections
+import itertools
 
 from oslo_db import api as oslo_db_api
 from oslo_log import log as logging
@@ -223,6 +224,28 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
         raise exception.InvalidInventory(
             resource_class=class_str, resource_provider=provider_str)
 
+    # check if this a complete replacement of one consumer with another one
+    # TODO(jkulik): Make this only work if it's replacing to same or less.
+    consumer_resources = collections.defaultdict(list)
+    for alloc in allocs:
+        d = (alloc.resource_class, alloc.used)
+        consumer_resources[alloc.consumer.id].append(d)
+    is_replacement = len(consumer_resources) == 2
+    if is_replacement:
+        # sort the resources so we get matching resource pairs (if possible) in
+        # the next step
+        for k in consumer_resources:
+            consumer_resources[k].sort()
+        # check that every resource change has a matching second change
+        # removing it from another consumer so the whole process is a
+        # replacement
+        for items in itertools.zip_longest(*consumer_resources.values(),
+                                           fillvalue=(None, None)):
+            (cls1, used1), (cls2, used2) = items
+            if cls1 != cls2 or 0 not in (used1, used2):
+                is_replacement = False
+                break
+
     res_providers = {}
     rp_resource_class_sum = collections.defaultdict(
         lambda: collections.defaultdict(int))
@@ -292,14 +315,17 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
                 'cap': capacity,
             }
 
-            if prev_used is not None and (
-                    used + amount_needed_all <= prev_used):
+            if is_replacement or (prev_used is not None and
+                                  used + amount_needed_all < prev_used):
                 # The situation is no worse than it was, so no reason to
-                # refuse the change.
+                # refuse the change. A complete allocation replacement is
+                # also allowed, so that resources can be switched on an
+                # overused provider.
                 LOG.warning(
                     "Over capacity for %(rc)s on resource provider "
-                    "%(rp)s but allocation of %(needed)s reduces "
-                    "existing overage from %(prev_used)s to %(needed_all)s",
+                    "%(rp)s but allocation of %(needed)s is permitted "
+                    "as a replacement or reduces existing overage from "
+                    "%(prev_used)s to %(needed_all)s",
                     params)
             else:
                 # The situation is worse than it was, so refuse.
