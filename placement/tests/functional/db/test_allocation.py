@@ -678,3 +678,130 @@ class TestAllocationListCreateDelete(tb.PlacementDbBaseTestCase):
         new_rp = alloc_list[0].resource_provider
         self.assertEqual(original_generation, rp1.generation)
         self.assertEqual(original_generation + 1, new_rp.generation)
+
+    def test_switch_allocations_overbooked(self):
+        """A resource-provider which is already overbooked gets an allocation
+        switched from one consumer to another one. This is necessary to migrate
+        away resources to make the resource-provider less full.
+        """
+        rp = self._create_provider('full_rp')
+
+        cpu_inv = tb.add_inventory(rp, orc.VCPU, 24,
+                                   allocation_ratio=16.0)
+        mem_inv = tb.add_inventory(rp, orc.MEMORY_MB, 1024,
+                                   min_unit=64,
+                                   max_unit=1024,
+                                   step_size=64)
+
+        # Create a consumer already filling half the provider
+        filling_consumer = consumer_obj.Consumer(
+            self.ctx, uuid=uuidsentinel.filler, user=self.user_obj,
+            project=self.project_obj)
+        filling_consumer.create()
+
+        alloc_list = [
+            alloc_obj.Allocation(
+                consumer=filling_consumer,
+                resource_provider=rp,
+                resource_class=orc.VCPU,
+                used=12),
+            alloc_obj.Allocation(
+                consumer=filling_consumer,
+                resource_provider=rp,
+                resource_class=orc.MEMORY_MB,
+                used=512)
+        ]
+        alloc_obj.replace_all(self.ctx, alloc_list)
+
+        # Create a consumer representing the instance, filling the other half
+        inst_consumer = consumer_obj.Consumer(
+            self.ctx, uuid=uuidsentinel.instance, user=self.user_obj,
+            project=self.project_obj)
+        inst_consumer.create()
+
+        alloc_list = [
+            alloc_obj.Allocation(
+                consumer=inst_consumer,
+                resource_provider=rp,
+                resource_class=orc.VCPU,
+                used=12),
+            alloc_obj.Allocation(
+                consumer=inst_consumer,
+                resource_provider=rp,
+                resource_class=orc.MEMORY_MB,
+                used=512)
+        ]
+        alloc_obj.replace_all(self.ctx, alloc_list)
+
+        # inventory of the provider changes (because a host in the cluster it
+        # represents goes down or a memory-module fails
+        mem_inv.total = 768
+        rp.set_inventory([cpu_inv, mem_inv])
+
+        # Create a consumer representing the migration
+        mig_consumer = consumer_obj.Consumer(
+            self.ctx, uuid=uuidsentinel.migration, user=self.user_obj,
+            project=self.project_obj)
+        mig_consumer.create()
+
+        # requesting additional resources fails
+        alloc_list = [
+            alloc_obj.Allocation(
+                consumer=mig_consumer,
+                resource_provider=rp,
+                resource_class=orc.VCPU,
+                used=12),
+            alloc_obj.Allocation(
+                consumer=mig_consumer,
+                resource_provider=rp,
+                resource_class=orc.MEMORY_MB,
+                used=512)
+        ]
+        self.assertRaises(exception.InvalidAllocationCapacityExceeded,
+                          alloc_obj.replace_all, self.ctx, alloc_list)
+
+        # switching over some resources from one consumer to another fails
+        alloc_list.append(
+            alloc_obj.Allocation(
+                consumer=inst_consumer,
+                resource_provider=rp,
+                resource_class=orc.MEMORY_MB,
+                used=0)
+        )
+        self.assertRaises(exception.InvalidAllocationCapacityExceeded,
+                          alloc_obj.replace_all, self.ctx, alloc_list)
+
+        # switch over all resources works
+        alloc_list.append(
+            alloc_obj.Allocation(
+                consumer=inst_consumer,
+                resource_provider=rp,
+                resource_class=orc.VCPU,
+                used=0)
+        )
+        alloc_obj.replace_all(self.ctx, alloc_list)
+
+        # check that we still have the same number of resources allocations
+        allocations = alloc_obj.get_all_by_resource_provider(self.ctx, rp)
+        self.assertEqual(4, len(allocations))
+
+        # instance now has no allocations
+        allocations = alloc_obj.get_all_by_consumer_id(self.ctx,
+                                                       inst_consumer.uuid)
+        self.assertEqual(0, len(allocations))
+
+        # migration has the resources of the instance
+        allocations = alloc_obj.get_all_by_consumer_id(self.ctx,
+                                                       mig_consumer.uuid)
+        self.assertEqual(2, len(allocations))
+        expected = sorted([(orc.VCPU, 12), (orc.MEMORY_MB, 512)])
+        actual = sorted([(a.resource_class, a.used) for a in allocations])
+        self.assertEqual(expected, actual)
+
+        # filling consumer stayed the same
+        allocations = alloc_obj.get_all_by_consumer_id(self.ctx,
+                                                       filling_consumer.uuid)
+        self.assertEqual(2, len(allocations))
+        expected = sorted([(orc.VCPU, 12), (orc.MEMORY_MB, 512)])
+        actual = sorted([(a.resource_class, a.used) for a in allocations])
+        self.assertEqual(expected, actual)
