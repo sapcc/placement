@@ -1,0 +1,3 @@
+# Any custom requirements that we need for ccloud
+
+-e git+https://github.com/sapcc/raven-python.git@ccloud#egg=raven
