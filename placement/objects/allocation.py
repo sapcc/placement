@@ -158,7 +158,13 @@ def _check_capacity_exceeded(ctx, allocs):
     sel = sel.where(
         sa.and_(_RP_TBL.c.id.in_(provider_ids),
                 _INV_TBL.c.resource_class_id.in_(rc_ids)))
-    records = ctx.session.execute(sel)
+    # NOTE(pas-ha): Use a separate database transaction to read
+    # the data because we might be wrapped in an outer
+    # database transaction when we reach here. We want to get an
+    # up-to-date usage value in case a racing request has
+    # changed it after we began an outer transaction.
+    with db_api.placement_context_manager.reader.independent.using(ctx):
+        records = ctx.session.execute(sel)
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}
     provs_with_inv = set()
