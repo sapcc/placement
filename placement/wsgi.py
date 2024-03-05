@@ -34,9 +34,6 @@ osprofiler_initializer = importutils.try_import('osprofiler.initializer')
 profiler = importutils.try_import('osprofiler.opts')
 
 
-CONFIG_FILE = 'placement.conf'
-
-
 # The distribution name is required here, not package.
 version_info = pbr.version.VersionInfo('openstack-placement')
 
@@ -63,8 +60,15 @@ def _get_config_files(env=None):
         env = os.environ
 
     dirname = env.get('OS_PLACEMENT_CONFIG_DIR', '').strip()
+
+    files = [s.strip() for s in
+             env.get('OS_PLACEMENT_CONFIG_FILES', '').split(';') if s.strip()]
+
     if dirname:
-        return [os.path.join(dirname, CONFIG_FILE)]
+        if not files:
+            files = ['placement.conf']
+        files = [os.path.join(dirname, fname) for fname in files]
+        return files
     else:
         return None
 
