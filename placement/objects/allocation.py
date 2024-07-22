@@ -164,7 +164,7 @@ def _check_capacity_exceeded(ctx, allocs):
     # up-to-date usage value in case a racing request has
     # changed it after we began an outer transaction.
     with db_api.placement_context_manager.reader.independent.using(ctx):
-        records = ctx.session.execute(sel)
+        records = ctx.session.execute(sel).all()
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}
     provs_with_inv = set()
