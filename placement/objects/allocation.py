@@ -143,6 +143,7 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
     #    FROM allocations
     #    WHERE resource_class_id IN ($RESOURCE_CLASSES)
     #    AND resource_provider_id IN ($RESOURCE_PROVIDERS)
+    #    AND consumer_id NOT IN ($CONSUMERS)
     #    GROUP BY resource_provider_id, resource_class_id
     # ) AS allocs
     # ON inv.resource_provider_id = allocs.resource_provider_id
@@ -156,7 +157,19 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
                   for a in allocs])
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
     provider_ids = set([a.resource_provider.id for a in allocs])
-    usage = _provider_usage_query(provider_ids, rc_ids).subquery(name='usage')
+    consumer_uuids = {alloc.consumer.uuid for alloc in allocs}
+    usage = sa.select(
+        _ALLOC_TBL.c.resource_provider_id,
+        _ALLOC_TBL.c.resource_class_id,
+        sql.func.sum(_ALLOC_TBL.c.used).label('used'),
+    )
+    usage = usage.where(
+        sa.and_(_ALLOC_TBL.c.resource_class_id.in_(rc_ids),
+                _ALLOC_TBL.c.resource_provider_id.in_(provider_ids),
+                sa.not_(_ALLOC_TBL.c.consumer_id.in_(consumer_uuids))))
+    usage = usage.group_by(_ALLOC_TBL.c.resource_provider_id,
+                           _ALLOC_TBL.c.resource_class_id)
+    usage = usage.subquery(name='usage')
 
     inv_join = sql.join(
         _RP_TBL, _INV_TBL,
