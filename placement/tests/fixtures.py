@@ -18,6 +18,7 @@
 
 
 from oslo_config import cfg
+from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import test_fixtures
 
 from placement.db.sqlalchemy import migration
@@ -43,6 +44,20 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
         self.conf_fixture = conf_fixture
         self.get_engine = placement_db.get_placement_engine
         placement_db.configure(self.conf_fixture.conf)
+
+    def setUp(self):
+        super().setUp()
+        self.__orig_clone = enginefacade._TransactionContextManager._clone
+
+        def patched_clone(inner_self, **kwargs):
+            kwargs['independent'] = False
+            return self.__orig_clone(inner_self, **kwargs)
+
+        enginefacade._TransactionContextManager._clone = patched_clone
+
+    def cleanUp(self):
+        super().cleanUp()
+        enginefacade._TransactionContextManager._clone = self.__orig_clone
 
     def get_enginefacade(self):
         return placement_db.placement_context_manager
