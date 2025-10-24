@@ -241,7 +241,14 @@ def update_traits_for_resource_provider(req):
         raise webob.exc.HTTPBadRequest(
             "No such trait %s" % ', '.join(non_existed_trait))
 
-    resource_provider.set_traits(trait_objs)
+    try:
+        resource_provider.set_traits(trait_objs)
+    except exception.ConcurrentUpdateDetected:
+        raise webob.exc.HTTPConflict(
+            "Resource provider's generation already changed. Please update "
+            "the generation and try again.",
+            json_formatter=util.json_error_formatter,
+            comment=errors.CONCURRENT_UPDATE)
 
     response_body, last_modified = _serialize_traits(trait_objs, want_version)
     response_body[
