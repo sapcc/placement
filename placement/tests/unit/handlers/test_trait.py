@@ -68,3 +68,51 @@ class TestTraitHandler(base.ContextTestCase):
 
         # Confirm we attempt to create the trait.
         mock_create.assert_called_once_with()
+
+    @mock.patch('placement.objects.trait.get_all')
+    @mock.patch('placement.objects.resource_provider.ResourceProvider.'
+                'get_by_uuid')
+    @mock.patch('placement.context.RequestContext.can')
+    @mock.patch('placement.util.extract_json')
+    @mock.patch('placement.util.wsgi_path_item')
+    def test_trait_update_concurrent(
+            self, mock_path, mock_json, mock_can, mock_get_rp_by_uuid,
+            mock_trait_get_all):
+        """Test that we call update_traits concurrently that we handle a
+        potential ConcurrentUpdateDetected
+        """
+        fake_context = context.RequestContext(
+            user_id='fake', project_id='fake')
+
+        req = webob.Request.blank(
+            '/resource_providers/uuid/traits',
+            method='POST',
+            content_type='application/json')
+
+        req.environ['placement.context'] = fake_context
+        req.body = b'{}'
+
+        mock_rp = mock.MagicMock(
+            generation=mock.sentinel.rp_gen,
+        )
+        mock_rp.set_traits.side_effect = exception.ConcurrentUpdateDetected
+        mock_get_rp_by_uuid.return_value = mock_rp
+
+        existing_traits = [mock.MagicMock(name="fake")]
+        mock_trait_get_all.return_value = existing_traits
+
+        parse_version = microversion_parse.parse_version_string
+        microversion = parse_version('1.15')
+        microversion.max_version = parse_version('9.99')
+        microversion.min_version = parse_version('1.0')
+        req.environ['placement.microversion'] = microversion
+
+        mock_json.return_value = {
+            'resource_provider_generation': mock.sentinel.rp_gen,
+            'traits': [t.name for t in existing_traits],
+        }
+
+        response = req.get_response(trait.update_traits_for_resource_provider)
+
+        # We expect a 409 error to be returned
+        self.assertEqual('409 Conflict', response.status)

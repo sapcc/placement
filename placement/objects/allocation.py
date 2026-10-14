@@ -11,6 +11,7 @@
 #    under the License.
 
 import collections
+import itertools
 
 from oslo_db import api as oslo_db_api
 from oslo_log import log as logging
@@ -143,6 +144,7 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
     #    FROM allocations
     #    WHERE resource_class_id IN ($RESOURCE_CLASSES)
     #    AND resource_provider_id IN ($RESOURCE_PROVIDERS)
+    #    AND consumer_id NOT IN ($CONSUMERS)
     #    GROUP BY resource_provider_id, resource_class_id
     # ) AS allocs
     # ON inv.resource_provider_id = allocs.resource_provider_id
@@ -156,7 +158,19 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
                   for a in allocs])
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
     provider_ids = set([a.resource_provider.id for a in allocs])
-    usage = _provider_usage_query(provider_ids, rc_ids).subquery(name='usage')
+    consumer_uuids = {alloc.consumer.uuid for alloc in allocs}
+    usage = sa.select(
+        _ALLOC_TBL.c.resource_provider_id,
+        _ALLOC_TBL.c.resource_class_id,
+        sql.func.sum(_ALLOC_TBL.c.used).label('used'),
+    )
+    usage = usage.where(
+        sa.and_(_ALLOC_TBL.c.resource_class_id.in_(rc_ids),
+                _ALLOC_TBL.c.resource_provider_id.in_(provider_ids),
+                sa.not_(_ALLOC_TBL.c.consumer_id.in_(consumer_uuids))))
+    usage = usage.group_by(_ALLOC_TBL.c.resource_provider_id,
+                           _ALLOC_TBL.c.resource_class_id)
+    usage = usage.subquery(name='usage')
 
     inv_join = sql.join(
         _RP_TBL, _INV_TBL,
@@ -185,7 +199,13 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
     sel = sel.where(
         sa.and_(_RP_TBL.c.id.in_(provider_ids),
                 _INV_TBL.c.resource_class_id.in_(rc_ids)))
-    records = ctx.session.execute(sel)
+    # NOTE(pas-ha): Use a separate database transaction to read
+    # the data because we might be wrapped in an outer
+    # database transaction when we reach here. We want to get an
+    # up-to-date usage value in case a racing request has
+    # changed it after we began an outer transaction.
+    with db_api.placement_context_manager.reader.independent.using(ctx):
+        records = ctx.session.execute(sel).all()
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}
     provs_with_inv = set()
@@ -203,6 +223,28 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
         provider_str = ', '.join(missing_provs)
         raise exception.InvalidInventory(
             resource_class=class_str, resource_provider=provider_str)
+
+    # check if this a complete replacement of one consumer with another one
+    # TODO(jkulik): Make this only work if it's replacing to same or less.
+    consumer_resources = collections.defaultdict(list)
+    for alloc in allocs:
+        d = (alloc.resource_class, alloc.used)
+        consumer_resources[alloc.consumer.id].append(d)
+    is_replacement = len(consumer_resources) == 2
+    if is_replacement:
+        # sort the resources so we get matching resource pairs (if possible) in
+        # the next step
+        for k in consumer_resources:
+            consumer_resources[k].sort()
+        # check that every resource change has a matching second change
+        # removing it from another consumer so the whole process is a
+        # replacement
+        for items in itertools.zip_longest(*consumer_resources.values(),
+                                           fillvalue=(None, None)):
+            (cls1, used1), (cls2, used2) = items
+            if cls1 != cls2 or 0 not in (used1, used2):
+                is_replacement = False
+                break
 
     res_providers = {}
     rp_resource_class_sum = collections.defaultdict(
@@ -273,14 +315,17 @@ def _check_capacity_exceeded(ctx, allocs, prev_usage):
                 'cap': capacity,
             }
 
-            if prev_used is not None and (
-                    used + amount_needed_all <= prev_used):
+            if is_replacement or (prev_used is not None and
+                                  used + amount_needed_all < prev_used):
                 # The situation is no worse than it was, so no reason to
-                # refuse the change.
+                # refuse the change. A complete allocation replacement is
+                # also allowed, so that resources can be switched on an
+                # overused provider.
                 LOG.warning(
                     "Over capacity for %(rc)s on resource provider "
-                    "%(rp)s but allocation of %(needed)s reduces "
-                    "existing overage from %(prev_used)s to %(needed_all)s",
+                    "%(rp)s but allocation of %(needed)s is permitted "
+                    "as a replacement or reduces existing overage from "
+                    "%(prev_used)s to %(needed_all)s",
                     params)
             else:
                 # The situation is worse than it was, so refuse.
