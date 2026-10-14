@@ -642,9 +642,10 @@ class TestAllocationListCreateDelete(tb.PlacementDbBaseTestCase):
         log_line = (mock_log.warning.call_args_list[0][0][0] %
                     mock_log.warning.call_args_list[0][0][1])
         self.assertEqual(
-            log_line,
             ('Over capacity for VCPU on resource provider %s but allocation of'
-             ' 6 reduces existing overage from 14 to 13') % provider.uuid)
+             ' 6 is permitted as a replacement or reduces existing overage '
+             'from 14 to 13') % provider.uuid,
+            log_line)
 
         # Attempt to reduce the over-capacity issue by reducing both
         # allocations to 6 (one is still at 7, one is already at 6).
@@ -658,8 +659,9 @@ class TestAllocationListCreateDelete(tb.PlacementDbBaseTestCase):
                        for consumer in consumers]
         alloc_obj.replace_all(self.ctx, allocs_post)
 
-        # Make sure we can swap inventory to another consumer without any
-        # improvement (but no further worsening either).
+        # Swapping an allocation between consumers without reducing the
+        # over-capacity situation is not permitted unless it is a complete
+        # replacement.
         alt_consumer = consumer_obj.Consumer(self.ctx, uuid=uuidsentinel.inst3,
                                              user=self.user_obj,
                                              project=self.project_obj)
@@ -671,17 +673,16 @@ class TestAllocationListCreateDelete(tb.PlacementDbBaseTestCase):
                                             used=(6 if consumer != consumers[0]
                                                   else 0))
                        for consumer in consumers]
-        alloc_obj.replace_all(self.ctx, allocs_post)
-        # First consumer no longer has an allocation, so remove it from our
-        # list
-        del consumers[0]
+        self.assertRaises(exception.InvalidAllocationCapacityExceeded,
+                          alloc_obj.replace_all, self.ctx, allocs_post)
 
         # Make sure that we can bring the provider out of over-capacity by
         # reducing multiple allocations at once.
         allocs_post = [alloc_obj.Allocation(consumer=consumer,
                                             resource_provider=provider,
                                             resource_class=orc.VCPU,
-                                            used=5)
+                                            used=(5 if consumer != alt_consumer
+                                                  else 0))
                        for consumer in consumers]
         alloc_obj.replace_all(self.ctx, allocs_post)
 
